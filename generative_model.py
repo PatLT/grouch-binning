@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.special import binom
 
 class Shape():
     def __init__(self,segments_x,segments_y) -> None:
@@ -14,7 +15,7 @@ class Shape():
             shape: The shape described by these vertices.
         """
         seg_x,seg_y = cls.seg_rep_from_verts(*vertices)
-        return cls.__init__(seg_x,seg_y)
+        return cls(seg_x,seg_y)
         
     def inner_shape(self,dist):
         """Generate a new shape which corresponds to the older shape with its edges
@@ -53,8 +54,8 @@ class Shape():
             y_start = min(edge_y) ; y_end = max(edge_y)
             # Check intersections
             for j,(x,y) in enumerate(zip(intersec_x,intersec_y)):
-                if not np.isnan(x) and not np.isnan(y):
-                    if x > x_start and x < x_end and y > y_start and y < y_end:
+                if not np.isnan(x) and not np.isnan(y) and j!=i:
+                    if x >= x_start and x <= x_end and y >= y_start and y <= y_end:
                         # Have found an intersection that lies on this line segment.
                         # If it lies on another line segment, it's a new vertex. 
                         if [j,i] in pos_new_verts:
@@ -73,7 +74,8 @@ class Shape():
                         # Have found a vertex to remove
                         vert_to_remove.append([loc0,loc1])
                         edge_to_remove.append(ind)
-                # Add new point
+            # Add new points in a separate loop
+            for i,j in new_verts:
                 trial_seg_x[i,j] = new_seg_x[i,j]
                 trial_seg_x[j,i] = new_seg_x[j,i]
                 trial_seg_y[i,j] = new_seg_y[i,j]
@@ -88,6 +90,29 @@ class Shape():
             trial_seg_y = np.delete(trial_seg_y,edge_to_remove,axis=1)
             
         return Shape(trial_seg_x,trial_seg_y)
+    
+    def get_cyclic_vert_order(self,complete_loop=True):
+        verts = []
+        cnt = 0 ; i = 0 ; i_prev = None
+        while cnt < self.num_edges:
+            if cnt%2==0:
+                line_x = self.seg_x[i,:] ; line_y = self.seg_y[i,:]
+            else:
+                line_x = self.seg_x[:,i] ; line_y = self.seg_y[:,i]
+            inds = np.argwhere(~np.isnan(line_x)).flatten()
+            if i_prev is None:
+                i_prev = inds[0]
+            verts.append([line_x[i_prev],line_y[i_prev]])
+            # New values of i, i_prev
+            i_temp = i
+            i = inds[np.where(inds!=i_prev)][0]
+            i_prev = i_temp
+            cnt += 1
+        # Go back to first vertex?
+        if complete_loop:
+            verts.append(verts[0])
+        return verts
+            
         
         
     @staticmethod
@@ -206,4 +231,110 @@ class Shape():
         com_y = np.ma.masked_invalid(sgr_y).sum()/(~np.isnan(sgr_y)).sum()
         return com_x,com_y
     
+class Slice(Shape):
+    def __init__(self, segments_x, segments_y) -> None:
+        super().__init__(segments_x, segments_y)
+        self.contours = []
+        self.scan_path = []
+        self.scan_cmds = []
     
+    def gen_scan_path(self,theta,dist,**kwargs):
+        """Generate scan paths for this slice. 
+
+        Args:
+            theta (float): Orientation of the hatch lines
+            dist (float): Separation between scan lines
+        """
+        contour_scans = kwargs.get("contour_scans",1)
+        hta = kwargs.get("hatch_turn_allowance",kwargs.get("hta",1.5))
+        smooth_inner_contour = kwargs.get("smooth_inner_contour",True)
+        # Inner contour
+        if contour_scans > 0:
+            self.contours.append(self.inner_shape(dist))
+            for i in range(1,contour_scans):
+                self.contours.append(self.contours[i-1].inner_shape(dist))
+            innermost = self.contours[-1]
+        else:
+            innermost = self
+        # Hatch boundary shape
+        hatch_bshape = innermost.inner_shape(dist*hta)
+        self._hbs = hatch_bshape
+        # a,b,c defining the hatch lines
+        a_h = -np.sin(theta)
+        b_h = np.cos(theta)
+        c_h_array = a_h*hatch_bshape.seg_x + b_h*hatch_bshape.seg_y
+        inds = np.triu_indices_from(c_h_array,k=1)
+        c_h_all = c_h_array[inds][~np.isnan(c_h_array[inds])]
+        dists = np.abs(c_h_all[:,None] - c_h_all[None,:])
+        c_h_i,c_h_f = c_h_all[np.array(np.unravel_index(np.argmax(dists),dists.shape))]
+        #  Hatch sequence
+        direction = 1
+        hatch_pts_x = []
+        hatch_pts_y = []
+        # Loop over every line in the hatch 
+        for c_h in np.arange(min(c_h_i,c_h_f),max(c_h_i,c_h_f),dist)[1:]:
+            # Intersections of this hatch line
+            inters_x = [] ; inters_y = []
+            for i in range(innermost.num_edges):
+                x1 , x2   = innermost.seg_x[i][~np.isnan(innermost.seg_x[i])]
+                y1 , y2   = innermost.seg_y[i][~np.isnan(innermost.seg_y[i])]
+                x1_i,x2_i = hatch_bshape.seg_x[i][~np.isnan(hatch_bshape.seg_x[i])]
+                y1_i,y2_i = hatch_bshape.seg_y[i][~np.isnan(hatch_bshape.seg_y[i])]
+                x_h , y_h   = Shape.seg_intersect((a_h,b_h,c_h),(x1,y1),(x2,y2))
+                x_h_i,y_h_i = Shape.seg_intersect((a_h,b_h,c_h),(x1_i,y1_i),(x2_i,y2_i))
+                if x_h is not None and y_h is not None:
+                    inters_x.append(x_h)
+                    inters_y.append(y_h)
+                if x_h_i is not None and y_h_i is not None:
+                    inters_x.append(x_h_i)
+                    inters_y.append(y_h_i)
+            if np.abs(theta) != np.pi/2:
+                order_ = np.argsort(inters_x)
+            else:
+                order_ = np.argsort(inters_y)
+            inters_x = np.array(inters_x)[order_][::direction]
+            inters_y = np.array(inters_y)[order_][::direction]
+            direction *= -1
+            hatch_pts_x = np.r_[hatch_pts_x,inters_x]
+            hatch_pts_y = np.r_[hatch_pts_y,inters_y]
+        self.hatch_pts_x = hatch_pts_x[:-1]
+        self.hatch_pts_y = hatch_pts_y[:-1]
+        # The scan path is specified as a set of coordinates
+        # AND a set of commands that specify how to sample the coordinates.
+        # Commands:
+        # c = 1+ -> Start of Bezier curve of degree c
+        # c = 0  -> Laser switched off
+        # c = -1 -> Control point for bezier curve.
+        
+        # Outer perimeter
+        self.scan_path += self.get_cyclic_vert_order()
+        # Contour Scans
+        if contour_scans > 0:
+            for contour in self.contours:
+                self.scan_path += contour.get_cyclic_vert_order()
+        # Hatching
+        self.scan_path += list(zip(self.hatch_pts_x,self.hatch_pts_y))
+        
+        self.scan_path = np.array(self.scan_path)
+       
+        
+        
+def bezier(d,*control_points,**kwargs):
+    """Generate a Bezier curve, sampling points separated by arclength d. 
+    The degree of the Bezier curve is arbitrary.
+
+    Args:
+        d (float): Sampling distance. 
+
+    Returns:
+        ndarray: Bezier curve sampled at even interval along the arclength.
+    """
+    num_t_samples = kwargs.get("num_t_samples",100)
+    n = len(control_points)
+    bz_func = lambda t: sum(binom(n,i)*(1-t)**(n-i)*t**i*control_points[i][None,:] for i in range(n))
+    # Now take lazy approach: generate 100 sample points then resample as required...
+    t_ = np.linspace(0.0,1.0,num_t_samples)
+    samples = bz_func(t_[:,None])
+    arc_dists = np.r_[[0.0],np.cumsum(np.linalg.norm(samples[1:] - samples[:-1],axis=1))]
+    t_final = np.interp(np.arange(0.0,arc_dists[-1],d),arc_dists,t_)[:,None]
+    return bz_func(t_final)
