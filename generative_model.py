@@ -321,7 +321,8 @@ class Slice(Shape):
         
 def bezier(d,*control_points,**kwargs):
     """Generate a Bezier curve, sampling points separated by arclength d. 
-    The degree of the Bezier curve is arbitrary.
+    The degree of the Bezier curve is arbitrary, and determined by the 
+    number of control points.
 
     Args:
         d (float): Sampling distance. 
