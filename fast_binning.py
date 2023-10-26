@@ -3,6 +3,43 @@ import pandas as pd
 from scipy.fft import fft,ifft
 from matplotlib.colors import LogNorm
 import matplotlib.pyplot as plt
+import numba as nb
+
+@nb.njit('(float32[:,::1],int64[::1],float32[::1,:])')
+def add_at(a,indices,b):
+    """Faster version of numpy.add.at (about x50 faster.)
+    
+    NOTE: the signatures for a and b look different because use-case is for
+    a created as a numpy array with C-contiguous order, whereas 
+    pandas.DataFrame.to_numpy() for some reason cretaes an array with 
+    fortran-contiguous order. 
+
+    Args:
+        a (ndarray, np.float32): Array to add to. 
+        indices (ndarray, np.int64): Indices to add at.
+        b (ndarray, np.float32): Array for adding.
+    """
+    for i in range(indices.shape[0]):
+        for j in range(b.shape[1]):
+            a[indices[i],j] += b[i,j]
+            
+@nb.njit('(uint64[:,::1],int64[::1],boolean[::1,:])')
+def addBool_at(a,indices,b):
+    """Faster version of numpy.add.at (about x50 faster.)
+    
+    NOTE: the signatures for a and b look different because use-case is for
+    a created as a numpy array with C-contiguous order, whereas 
+    pandas.DataFrame.to_numpy() for some reason cretaes an array with 
+    fortran-contiguous order. 
+
+    Args:
+        a (ndarray, np.float32): Array to add to.
+        indices (ndarray, np.int64): Indices to add at.
+        b (ndarray, np.bool_): Array for adding.
+    """
+    for i in range(indices.shape[0]):
+        for j in range(b.shape[1]):
+            a[indices[i],j] += b[i,j]
 
 def adjust_and_pad(x,y,pad=1.0):
     """Apply some normalisation, then padding to spatial path data,
@@ -106,26 +143,30 @@ def conditional_breakpoints(dataframe,**kwargs):
         ends = np.r_[ends,[on_status.shape[0]]]
     return starts,ends
 
-def process_dataframe(dataframe,*data_bins,hatch_only=True,**kwargs):
+def process_dataframe(dataframe,*data_bins,scan_section="hatch",**kwargs):
     """Take a dataframe, a sequence of DataBins objects, 
     and carry out binning for each object on the dataframe.
 
     Args:
         dataframe (pd.DataFrame): Pandas dataframe
-        hatch_only (bool, optional): Whether to only bin data for hatch scans. Defaults to True.
+        scan_section (string, optional): Which section of scan paths to use. Options are 'hatch', 'perimeter', 'all'. Defaults to True.
 
     Returns:
         tuple,DataBins: binned databins objects. 
     """
     hrst = kwargs.get("hatch_reconstruction_score_threshold",0.9)
+    if not scan_section in ("hatch","perimeter","all"):
+        raise ValueError("scan_section argument must be one of 'hatch', 'perimeter' or 'all'.")
     
     starts,ends = conditional_breakpoints(dataframe,**kwargs)
     for start,end in zip(starts,ends):
-        if hatch_only:
+        if scan_section=='hatch' or scan_section=='perimeter':
             x,y = dataframe.loc[start:end,("X","Y")].values.T
             # Determine whether this segment corresponds to hatching or some other part of the build layer. 
             score = fft_recon_score(x,y,**kwargs)
-            if score > hrst:
+            if scan_section == 'hatch' and score > hrst:
+                continue
+            elif scan_section == 'perimeter' and score <= hrst:
                 continue
         # Assuming the section is valid
         for db in data_bins:
@@ -192,8 +233,8 @@ class DataBins():
         self.sum_bins   = np.zeros((np.prod([len(dim_bin_edges)+1 for dim_bin_edges in self.bin_edges]),
                                     len(variable_names),),
                              dtype=np.single)
-        self.sum2_bins = self.sum_bins.copy()
-        self.count_bins = self.sum_bins.copy().astype(np.uint32)
+        self.sum2_bins  = self.sum_bins.copy()
+        self.count_bins = self.sum_bins.copy().astype(np.uint64)
         
     def bin(self,dataframe):
         """Efficient datatframe binning. 
@@ -214,9 +255,12 @@ class DataBins():
         xy = np.ravel_multi_index(Ncount,self.nbin)
         #hist = np.bincount(xy,minlength=np.prod(self.nbin))
         # It's possible that using bincount is faster - need to check. 
-        np.add.at(self.sum_bins,xy[None,:],dataframe.loc[:,self.variable_names].values)
-        np.add.at(self.sum2_bins,xy[None,:],dataframe.loc[:,self.variable_names].values**2)
-        np.add.at(self.count_bins,xy[None,:],np.isfinite(dataframe.loc[:,self.variable_names]))
+        values = dataframe.loc[:,self.variable_names].fillna(0.0).to_numpy(dtype=np.float32)
+        finite_vals = np.isfinite(dataframe.loc[:,self.variable_names]).to_numpy(dtype=np.bool_)
+        add_at(self.sum_bins,xy,values)
+        add_at(self.sum2_bins,xy,values**2)
+        addBool_at(self.count_bins,xy,finite_vals)
+        
         
 def expand_df(df):
     """Expand a dataframe with extra variables:
@@ -244,9 +288,18 @@ def expand_df(df):
     df["Orientation"] = theta
     df["Speed"] = np.linalg.norm(v,axis=1)
     df["Acceleration"] = accel
+    df["Distance traversed"] = np.r_[0.0,np.linalg.norm(v,axis=1)]
     return df
 
 def calc_plot_range(*data_vals,non_zero=False):
+    """Helper function to find a suitable plot range for plotting binned data. 
+
+    Args:
+        non_zero (bool, optional): Whether to find the minimum non-zero value. Defaults to False.
+
+    Returns:
+        float,float: Lower and upper limits of the plotting range. 
+    """
     min_ = np.inf
     max_ = -np.inf
     for values in data_vals:
@@ -258,6 +311,14 @@ def calc_plot_range(*data_vals,non_zero=False):
     return 10**oom * np.floor(min_/10**oom), 10**oom * np.ceil(max_/10**oom)
 
 def calc_colour_range(*data_vals,non_zero=True):
+    """Another helper function, this finds the upper and lower bound to the non-zero binned data. 
+
+    Args:
+        non_zero (bool, optional): Whether to find the minimum non-zero value. Defaults to True.
+
+    Returns:
+        float,float: non-zero minimum and maximum of the bin values. 
+    """
     min_ = np.inf
     max_ = -np.inf
     for values in data_vals:
@@ -265,58 +326,96 @@ def calc_colour_range(*data_vals,non_zero=True):
         new_max = values.max()
         max_ = new_max if new_max > max_ else max_
         min_ = new_min if new_min < min_ else min_
-    return min_,max_
+    return float(min_),float(max_)
 
-def plot_bins(fig,variable,xy_plane_hist=None,theta_hist=None,z_hist=None,quantity="mean"):
+def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height_bins=None,
+              quantity="mean",cmap="afmhot_r",vrange=None):
+    """This function plots supplied bins (for a selection of the x-y, orientation, and Z-layer bins).
+
+    Args:
+        fig (matplotlib.figure.Figure): A matplotlib figure to append plots to. 
+        variable (string): Which binned variable to plot, e.g. "Photodiode","Spatter total area".
+        xy_plane_bins (DataBins, optional): Bins in the xy-plane. Defaults to None.
+        orientation_bins (DataBins, optional): Bins against scan path orientation. Defaults to None.
+        layer_height_bins (DataBins, optional): Bins against height / layer number. Defaults to None.
+        quantity (str or callable, optional): The quantity to calculate on a per-bin basis. Defaults to "mean".
+        cmap (str, optional): a matplotlib colormap. Defaults to "afmhot_r".
+        vrange (tuple, optional): The range of data values to use. Defaults to None.
+
+    Raises:
+        ValueError: quantity arg should be 'mean', 'std', 'count', 'per_traversed', or a callable.
+
+    Returns:
+        mpl.Axes,mpl.Axes,mpl.Axes,tuple: Axex object corresponding to each subplot, and a tuple of floats corresponding to the data range. 
+    """
+    # Error messages
+    err_0 = "DataBins should contain data for variable = '{}'".format(variable)
+    err_1 = "DataBins should contain data for variable = 'Distance traversed' in order to use arg quantity = 'per_traversed'"
     # Function used to calculate the plot quantity. 
     if callable(quantity):
         func_ = quantity
     elif quantity == "mean":
-        func_ = lambda histogram,index: np.divide(histogram.sum_bins[:,index],histogram.count_bins[:,index],out=np.zeros_like(histogram.sum_bins[:,index]),where=histogram.count_bins[:,index]>0)
+        func_ = lambda data_bins,index: np.divide(data_bins.sum_bins[:,index],data_bins.count_bins[:,index],out=np.zeros_like(data_bins.sum_bins[:,index]),where=data_bins.count_bins[:,index]>0)
     elif quantity == "std":
-        func_ = lambda histogram,index: np.sqrt(
-            np.divide(histogram.sum2_bins[:,index],histogram.count_bins[:,index],out=np.zeros_like(histogram.sum2_bins[:,index]),where=histogram.count_bins[:,index]>0) -\
-                np.divide(histogram.sum_bins[:,index],histogram.count_bins[:,index],out=np.zeros_like(histogram.sums[:,index]),where=histogram.count_bins[:,index]>0) **2 )
+        func_ = lambda data_bins,index: np.sqrt(
+            np.divide(data_bins.sum2_bins[:,index],data_bins.count_bins[:,index],out=np.zeros_like(data_bins.sum2_bins[:,index]),where=data_bins.count_bins[:,index]>0) -\
+                np.divide(data_bins.sum_bins[:,index],data_bins.count_bins[:,index],out=np.zeros_like(data_bins.sums[:,index]),where=data_bins.count_bins[:,index]>0) **2 )
     elif quantity == "count":
-        func_ = lambda histogram,index: histogram.count_bins[:,index]
+        func_ = lambda data_bins,index: data_bins.count_bins[:,index]
+    elif quantity == "per_traversed":
+        func_ = lambda data_bins,index: np.divide(data_bins.sum_bins[:,index],data_bins.sum_bins[:,"Distance traversed"],out=np.zeros_like(data_bins.sum_bins[:,index]),where=data_bins.count_bins[:,index]>0)
     else:
-        raise ValueError("quantity arg should be 'mean', 'std', 'count' or a callable.")
+        raise ValueError("quantity arg should be 'mean', 'std', 'count', 'per_traversed', or a callable.")
     
-    num_axes = sum([0 if hist is None else w for hist,w in zip((xy_plane_hist,theta_hist,z_hist),(1,2,2))])
+    num_axes = sum([0 if hist is None else w for hist,w in zip((xy_plane_bins,orientation_bins,layer_height_bins),(1,2,2))])
     ax_ind = 1
     
-    # Z-histogram
-    if z_hist is not None:
+    # Colormapping
+    cmap = plt.colormaps["afmhot_r"]
+    if vrange is None:
+        vmin,vmax = calc_colour_range(*[func_(hist,hist.variable_names.get_loc(variable)) for hist in (layer_height_bins,xy_plane_bins,orientation_bins) if hist is not None],non_zero=True)
+    else:
+        vmin,vmax = vrange
+    
+    # Z-data_bins
+    if layer_height_bins is not None:
+        # Check if variables exist
+        if not variable in layer_height_bins.variable_names:
+            raise ValueError(err_0)
+        elif not "Distance traversed" in layer_height_bins.variable_names:
+            raise ValueError(err_1)
         ax_z = fig.add_subplot(1,num_axes,ax_ind)
-        index = z_hist.variable_names.get_loc(variable)
-        values = func_(z_hist,index)[1:-1]
+        index = layer_height_bins.variable_names.get_loc(variable)
+        values = func_(layer_height_bins,index)[1:-1]
         # Make plot
-        ax_z.barh(0.5*(z_hist.bin_edges[0][1:] + z_hist.bin_edges[0][:-1]),
+        ax_z.barh(0.5*(layer_height_bins.bin_edges[0][1:] + layer_height_bins.bin_edges[0][:-1]),
             values,
-            z_hist.bin_edges[0][1:] - z_hist.bin_edges[0][:-1],
-            color='orange'
+            layer_height_bins.bin_edges[0][1:] - layer_height_bins.bin_edges[0][:-1],
+            color=cmap((values-vmin)/(vmax-vmin))
         )
         ax_z.set_ylabel("layer number")
         ax_z.set_xlim(*calc_plot_range(values))
-        ax_z.set_ylim(z_hist.bin_edges[0][0],z_hist.bin_edges[0][-1])
+        ax_z.set_ylim(layer_height_bins.bin_edges[0][0],layer_height_bins.bin_edges[0][-1])
         
         ax_ind += 1
     else:
         ax_z = None
     
     # XY planar heatmap
-    if xy_plane_hist is not None:
+    if xy_plane_bins is not None:
+        # Check if variables exist
+        if not variable in xy_plane_bins.variable_names:
+            raise ValueError(err_0)
+        elif not "Distance traversed" in xy_plane_bins.variable_names:
+            raise ValueError(err_1)
         ax_xy = fig.add_subplot(1,num_axes,(ax_ind,ax_ind+1))
-        index = xy_plane_hist.variable_names.get_loc(variable)
-        values = func_(xy_plane_hist,index).reshape(xy_plane_hist.nbin[0],xy_plane_hist.nbin[1])[1:-1,1:-1]
-        # Colormapping
-        cmap = plt.colormaps["afmhot_r"]
-        vmin,vmax = calc_colour_range(values,non_zero=True)
+        index = xy_plane_bins.variable_names.get_loc(variable)
+        values = func_(xy_plane_bins,index).reshape(xy_plane_bins.nbin[0],xy_plane_bins.nbin[1])[1:-1,1:-1]
         # Make plot 
-        for i,(x_l,x_u) in enumerate(zip(xy_plane_hist.bin_edges[0][:-1],(xy_plane_hist.bin_edges[0][1:]))):
-            for j,(y_l,y_u) in enumerate(zip(xy_plane_hist.bin_edges[0][:-1],(xy_plane_hist.bin_edges[0][1:]))):
+        for i,(x_l,x_u) in enumerate(zip(xy_plane_bins.bin_edges[0][:-1],(xy_plane_bins.bin_edges[0][1:]))):
+            for j,(y_l,y_u) in enumerate(zip(xy_plane_bins.bin_edges[0][:-1],(xy_plane_bins.bin_edges[0][1:]))):
                 v = values[i,j]
-                ax_xy.fill_between([x_l,x_u],[y_l,y_l],[y_u,y_u],color=cmap(v/vmax))
+                ax_xy.fill_between([x_l,x_u],[y_l,y_l],[y_u,y_u],color=cmap((v-vmin)/(vmax-vmin)))
         ax_xy.set_xlabel("x coordinate")
         ax_xy.set_ylabel("y coordinate")
         
@@ -324,22 +423,28 @@ def plot_bins(fig,variable,xy_plane_hist=None,theta_hist=None,z_hist=None,quanti
     else:
         ax_xy = None
     
-    # Orientation histogram
-    if theta_hist is not None:
+    # Orientation data_bins
+    if orientation_bins is not None:
+        # Check if variables exist
+        if not variable in orientation_bins.variable_names:
+            raise ValueError(err_0)
+        elif not "Distance traversed" in orientation_bins.variable_names:
+            raise ValueError(err_1)
+        
         # Some plotting parameters
         bot = 30.0
         top = 100.0
         
         ax_th = fig.add_subplot(1,num_axes,(ax_ind,ax_ind+1),polar=True)
-        index = theta_hist.variable_names.get_loc(variable)
-        values = func_(theta_hist,index)[1:-1]
+        index = orientation_bins.variable_names.get_loc(variable)
+        values = func_(orientation_bins,index)[1:-1]
         min_,max_ = calc_plot_range(values)
         # Make plot 
-        ax_th.bar(0.5*(theta_hist.bin_edges[0][1:] + theta_hist.bin_edges[0][:-1]),
+        ax_th.bar(0.5*(orientation_bins.bin_edges[0][1:] + orientation_bins.bin_edges[0][:-1]),
             bot + (top-bot) * (values - min_)/(max_ - min_),
-            width = theta_hist.bin_edges[0][1:] - theta_hist.bin_edges[0][:-1],
+            width = orientation_bins.bin_edges[0][1:] - orientation_bins.bin_edges[0][:-1],
             bottom = bot,
-            color='orange'
+            color=cmap((values-vmin)/(vmax-vmin))
         )
         ax_th.set_rticks([bot,0.5*(bot+top),top],labels=[min_,0.5*(min_+max_),max_])
         
@@ -347,4 +452,4 @@ def plot_bins(fig,variable,xy_plane_hist=None,theta_hist=None,z_hist=None,quanti
     else:
         ax_th = None
     
-    return ax_z,ax_xy,ax_th
+    return ax_z,ax_xy,ax_th,(vmin,vmax)
