@@ -1,11 +1,12 @@
 import numpy as np
 import pandas as pd 
 from scipy.fft import fft,ifft
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm,Normalize,SymLogNorm
 import matplotlib.pyplot as plt
+from matplotlib.cm import ScalarMappable
 import numba as nb
 
-@nb.njit('(float32[:,::1],int64[::1],float32[::1,:])')
+@nb.njit('(float64[:,::1],int64[::1],float64[::1,:])')
 def add_at(a,indices,b):
     """Faster version of numpy.add.at (about x50 faster.)
     
@@ -23,7 +24,7 @@ def add_at(a,indices,b):
         for j in range(b.shape[1]):
             a[indices[i],j] += b[i,j]
             
-@nb.njit('(uint64[:,::1],int64[::1],boolean[::1,:])')
+@nb.njit('(int64[:,::1],int64[::1],boolean[::1,:])')
 def addBool_at(a,indices,b):
     """Faster version of numpy.add.at (about x50 faster.)
     
@@ -160,6 +161,10 @@ def process_dataframe(dataframe,*data_bins,scan_section="hatch",**kwargs):
     
     starts,ends = conditional_breakpoints(dataframe,**kwargs)
     for start,end in zip(starts,ends):
+        if end - start <= 1:
+            # This is a bit of a hack and should probably be accounted for in the 
+            # function conditional_breakpoints
+            continue
         if scan_section=='hatch' or scan_section=='perimeter':
             x,y = dataframe.loc[start:end,("X","Y")].values.T
             # Determine whether this segment corresponds to hatching or some other part of the build layer. 
@@ -232,9 +237,9 @@ class DataBins():
         # We include two extra bins to account for outliers. 
         self.sum_bins   = np.zeros((np.prod([len(dim_bin_edges)+1 for dim_bin_edges in self.bin_edges]),
                                     len(variable_names),),
-                             dtype=np.single)
+                             dtype=np.float64)
         self.sum2_bins  = self.sum_bins.copy()
-        self.count_bins = self.sum_bins.copy().astype(np.uint64)
+        self.count_bins = self.sum_bins.copy().astype(np.int64)
         
     def bin(self,dataframe):
         """Efficient datatframe binning. 
@@ -255,7 +260,7 @@ class DataBins():
         xy = np.ravel_multi_index(Ncount,self.nbin)
         #hist = np.bincount(xy,minlength=np.prod(self.nbin))
         # It's possible that using bincount is faster - need to check. 
-        values = dataframe.loc[:,self.variable_names].fillna(0.0).to_numpy(dtype=np.float32)
+        values = dataframe.loc[:,self.variable_names].fillna(0.0).to_numpy(dtype=np.float64)
         finite_vals = np.isfinite(dataframe.loc[:,self.variable_names]).to_numpy(dtype=np.bool_)
         add_at(self.sum_bins,xy,values)
         add_at(self.sum2_bins,xy,values**2)
@@ -278,7 +283,7 @@ def expand_df(df):
     # Orientation
     v = r[2:,:] - r[:-2,:]
     v = np.r_[[r[1,:]-r[0,:]],v,[r[-1,:]-r[-2,:]]]
-    theta = np.arctan2(v[:,0],v[:,1])
+    theta = np.arctan2(v[:,1],v[:,0])
     # Acceleration
     v_mid = r[1:,:] - r[:-1,:]
     a = v_mid[1:,:] - v_mid[:-1,:]
@@ -288,7 +293,7 @@ def expand_df(df):
     df["Orientation"] = theta
     df["Speed"] = np.linalg.norm(v,axis=1)
     df["Acceleration"] = accel
-    df["Distance traversed"] = np.r_[0.0,np.linalg.norm(v,axis=1)]
+    df["Distance traversed"] = np.r_[0.0,np.linalg.norm(v_mid,axis=1)]
     return df
 
 def calc_plot_range(*data_vals,non_zero=False):
@@ -329,7 +334,7 @@ def calc_colour_range(*data_vals,non_zero=True):
     return float(min_),float(max_)
 
 def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height_bins=None,
-              quantity="mean",cmap="afmhot_r",vrange=None):
+              quantity="mean",cmap="afmhot_r",vrange=None,colorbar=True,normalisation='linear'):
     """This function plots supplied bins (for a selection of the x-y, orientation, and Z-layer bins).
 
     Args:
@@ -363,41 +368,55 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     elif quantity == "count":
         func_ = lambda data_bins,index: data_bins.count_bins[:,index]
     elif quantity == "per_traversed":
-        func_ = lambda data_bins,index: np.divide(data_bins.sum_bins[:,index],data_bins.sum_bins[:,"Distance traversed"],out=np.zeros_like(data_bins.sum_bins[:,index]),where=data_bins.count_bins[:,index]>0)
+        func_ = lambda data_bins,index: np.divide(data_bins.sum_bins[:,index],data_bins.sum_bins[:,data_bins.variable_names.get_loc("Distance traversed")],out=np.zeros_like(data_bins.sum_bins[:,index]),where=data_bins.count_bins[:,index]>0)
     else:
         raise ValueError("quantity arg should be 'mean', 'std', 'count', 'per_traversed', or a callable.")
     
-    num_axes = sum([0 if hist is None else w for hist,w in zip((xy_plane_bins,orientation_bins,layer_height_bins),(1,2,2))])
-    ax_ind = 1
+    ax_widths = (3,6,6)
+    ax_depth = 6
+    num_cols = sum([0 if hist is None else w for hist,w in zip((xy_plane_bins,orientation_bins,layer_height_bins),ax_widths)])
+    num_rows = ax_depth + 1 * colorbar
+    col_ind = 1
     
     # Colormapping
-    cmap = plt.colormaps["afmhot_r"]
+    cmap = plt.colormaps.get(cmap)
     if vrange is None:
         vmin,vmax = calc_colour_range(*[func_(hist,hist.variable_names.get_loc(variable)) for hist in (layer_height_bins,xy_plane_bins,orientation_bins) if hist is not None],non_zero=True)
     else:
         vmin,vmax = vrange
+    # Select normalisation
+    if normalisation.lower()=='linear':
+        norm = Normalize(vmin,vmax,clip=True)
+    elif normalisation.lower()=='symlog':
+        norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=True)
+    elif normalisation.lower()=='log':
+        norm = LogNorm(vmin=vmin,vmax=vmax,clip=True)
+    else:
+        raise ValueError("Normalisation should be 'linear', 'symlog', or 'log'.")
     
     # Z-data_bins
     if layer_height_bins is not None:
         # Check if variables exist
         if not variable in layer_height_bins.variable_names:
             raise ValueError(err_0)
-        elif not "Distance traversed" in layer_height_bins.variable_names:
+        elif not "Distance traversed" in layer_height_bins.variable_names and quantity == "per_traversed":
             raise ValueError(err_1)
-        ax_z = fig.add_subplot(1,num_axes,ax_ind)
+        ax_z = fig.add_subplot(num_rows,num_cols,(col_ind,num_cols*(ax_depth-1)+ax_widths[0]))
         index = layer_height_bins.variable_names.get_loc(variable)
         values = func_(layer_height_bins,index)[1:-1]
         # Make plot
         ax_z.barh(0.5*(layer_height_bins.bin_edges[0][1:] + layer_height_bins.bin_edges[0][:-1]),
             values,
             layer_height_bins.bin_edges[0][1:] - layer_height_bins.bin_edges[0][:-1],
-            color=cmap((values-vmin)/(vmax-vmin))
+            color=cmap(norm(values))
         )
         ax_z.set_ylabel("layer number")
         ax_z.set_xlim(*calc_plot_range(values))
         ax_z.set_ylim(layer_height_bins.bin_edges[0][0],layer_height_bins.bin_edges[0][-1])
+        ax_z.tick_params(axis='x',labelrotation=-45)
+        ax_z.ticklabel_format(axis='x',scilimits=[-3,4])
         
-        ax_ind += 1
+        col_ind += ax_widths[0]
     else:
         ax_z = None
     
@@ -406,20 +425,22 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
         # Check if variables exist
         if not variable in xy_plane_bins.variable_names:
             raise ValueError(err_0)
-        elif not "Distance traversed" in xy_plane_bins.variable_names:
+        elif not "Distance traversed" in xy_plane_bins.variable_names and quantity == "per_traversed":
             raise ValueError(err_1)
-        ax_xy = fig.add_subplot(1,num_axes,(ax_ind,ax_ind+1))
+        ax_xy = fig.add_subplot(num_rows,num_cols,(col_ind,num_cols*(ax_depth-1)+col_ind+ax_widths[1]-1))
         index = xy_plane_bins.variable_names.get_loc(variable)
         values = func_(xy_plane_bins,index).reshape(xy_plane_bins.nbin[0],xy_plane_bins.nbin[1])[1:-1,1:-1]
         # Make plot 
         for i,(x_l,x_u) in enumerate(zip(xy_plane_bins.bin_edges[0][:-1],(xy_plane_bins.bin_edges[0][1:]))):
             for j,(y_l,y_u) in enumerate(zip(xy_plane_bins.bin_edges[0][:-1],(xy_plane_bins.bin_edges[0][1:]))):
                 v = values[i,j]
-                ax_xy.fill_between([x_l,x_u],[y_l,y_l],[y_u,y_u],color=cmap((v-vmin)/(vmax-vmin)))
+                ax_xy.fill_between([x_l,x_u],[y_l,y_l],[y_u,y_u],color=cmap(norm(v)))
         ax_xy.set_xlabel("x coordinate")
         ax_xy.set_ylabel("y coordinate")
+        ax_xy.set_aspect("equal")
+        ax_xy.ticklabel_format(scilimits=[4,4])
         
-        ax_ind += 2
+        col_ind += ax_widths[1]
     else:
         ax_xy = None
     
@@ -428,14 +449,14 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
         # Check if variables exist
         if not variable in orientation_bins.variable_names:
             raise ValueError(err_0)
-        elif not "Distance traversed" in orientation_bins.variable_names:
+        elif not "Distance traversed" in orientation_bins.variable_names and quantity == "per_traversed":
             raise ValueError(err_1)
         
         # Some plotting parameters
         bot = 30.0
         top = 100.0
         
-        ax_th = fig.add_subplot(1,num_axes,(ax_ind,ax_ind+1),polar=True)
+        ax_th = fig.add_subplot(num_rows,num_cols,(col_ind,num_cols*(ax_depth-1)+col_ind+ax_widths[2]-1),polar=True)
         index = orientation_bins.variable_names.get_loc(variable)
         values = func_(orientation_bins,index)[1:-1]
         min_,max_ = calc_plot_range(values)
@@ -443,13 +464,28 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
         ax_th.bar(0.5*(orientation_bins.bin_edges[0][1:] + orientation_bins.bin_edges[0][:-1]),
             bot + (top-bot) * (values - min_)/(max_ - min_),
             width = orientation_bins.bin_edges[0][1:] - orientation_bins.bin_edges[0][:-1],
-            bottom = bot,
-            color=cmap((values-vmin)/(vmax-vmin))
+            bottom = 0.0,
+            color=cmap(norm(values))
         )
-        ax_th.set_rticks([bot,0.5*(bot+top),top],labels=[min_,0.5*(min_+max_),max_])
+        ax_th.set_rticks([bot,0.5*(bot+top),top],labels=map("{:.2e}".format,[min_,0.5*(min_+max_),max_]))
+        ax_th.set_rlabel_position(35.0)
+        #ax_th.tick_params(axis='y',labelrotation=-45)
         
-        ax_ind += 2
+        col_ind += ax_widths[2]
     else:
         ax_th = None
+        
+    # Colorbar
+    if colorbar:
+        ax_cb = fig.add_subplot(num_rows,num_cols,(num_cols*ax_depth+1,num_cols*num_rows))
+        fig.colorbar(ScalarMappable(cmap=cmap,norm=norm),
+                    cax=ax_cb,
+                    fraction=0.05,
+                    aspect=40,
+                    location=None,
+                    orientation='horizontal')
+        if normalisation.lower() == 'linear':
+            ax_cb.ticklabel_format(scilimits=[-3,4])
+        #col_ind += 1
     
     return ax_z,ax_xy,ax_th,(vmin,vmax)
