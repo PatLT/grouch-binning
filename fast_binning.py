@@ -4,6 +4,7 @@ from scipy.fft import fft,ifft
 from matplotlib.colors import LogNorm,Normalize,SymLogNorm
 import matplotlib.pyplot as plt
 from matplotlib.cm import ScalarMappable
+from copy import copy
 import numba as nb
 
 @nb.njit('(float64[:,::1],int64[::1],float64[::1,:])')
@@ -12,7 +13,7 @@ def add_at(a,indices,b):
     
     NOTE: the signatures for a and b look different because use-case is for
     a created as a numpy array with C-contiguous order, whereas 
-    pandas.DataFrame.to_numpy() for some reason cretaes an array with 
+    pandas.DataFrame.to_numpy() for some reason creates an array with 
     fortran-contiguous order. 
 
     Args:
@@ -30,7 +31,7 @@ def addBool_at(a,indices,b):
     
     NOTE: the signatures for a and b look different because use-case is for
     a created as a numpy array with C-contiguous order, whereas 
-    pandas.DataFrame.to_numpy() for some reason cretaes an array with 
+    pandas.DataFrame.to_numpy() for some reason creates an array with 
     fortran-contiguous order. 
 
     Args:
@@ -235,7 +236,7 @@ class DataBins():
         
         # Flattened bins
         # We include two extra bins to account for outliers. 
-        self.sum_bins   = np.zeros((np.prod([len(dim_bin_edges)+1 for dim_bin_edges in self.bin_edges]),
+        self.sum_bins   = np.zeros((np.prod(self.nbin),
                                     len(variable_names),),
                              dtype=np.float64)
         self.sum2_bins  = self.sum_bins.copy()
@@ -266,6 +267,45 @@ class DataBins():
         add_at(self.sum2_bins,xy,values**2)
         addBool_at(self.count_bins,xy,finite_vals)
         
+    def __getitem__(self,indices):
+        if isinstance(indices,tuple):
+            # If a tuple, it should have at the same length as the number of coordinates
+            if len(tuple) < self.D:
+                raise ValueError("Trying to slice along too few dimensions ({}). This object has {} coordinates.".format(len(tuple),self.D))
+            elif len(tuple) > self.D:
+                raise ValueError("Trying to slice along too many dimensions ({}). This object only has {} coordinates.".format(len(tuple),self.D))
+        else:
+            indices = (indices,) # For ease of handling 
+        # 'slice' this object's attributes
+        new_coord_names = []
+        new_bin_edges = []
+        bin_indices = []
+        for idx,coord_name,edges in zip(indices,self.coord_names,self.bin_edges):
+            if isinstance(idx,slice):
+                if abs(idx.step) != 1:
+                    raise ValueError("Slicing only supports continuous slicing.")
+                start,stop,step = idx.indices(len(edges)-1)
+                bin_indices.append(list(range(*slice(start+1,stop+1,step).indices(len(edges)+1)))) # +1 accounts for the extra bin at each end
+                # Now modify to account for the next step where we get edges not bins. 
+                stop +=1 if step==1 else stop
+                start +=1 if idx.step==-1 else start
+                new_coord_names.append(coord_name)
+                new_bin_edges.append(edges[slice(start,stop,idx.step)])
+            elif isinstance(idx,int):
+                bin_indices.append([idx])
+            else:
+                raise ValueError("Indices must be supplied as slice or int.")
+        
+        new_variable_names = copy(self.variable_names) # Keep all of the variables. 
+        new_object = DataBins(new_coord_names,new_bin_edges,new_variable_names,**self.kwargs)
+        # Can now slice this object's bins
+        old_bin_indices = np.ravel_multi_index(tuple(bin_indices),self.nbin)
+        new_bin_indices = np.ravel_multi_index((np.arange(1,nbin-1) for nbin in new_object.nbin),new_object.nbin) # Don't care about the extra bins at each end
+        new_object.sum_bins[new_bin_indices,...] = self.sum_bins[old_bin_indices,...]
+        new_object.sum2_bins[new_bin_indices,...] = self.sum2_bins[old_bin_indices,...]
+        new_object.count_bins[new_bin_indices,...] = self.count_bins[old_bin_indices,...]
+        
+        return new_object
         
 def expand_df(df):
     """Expand a dataframe with extra variables:
