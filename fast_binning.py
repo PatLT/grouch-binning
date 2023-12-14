@@ -306,6 +306,56 @@ class DataBins():
         new_object.count_bins[new_bin_indices,...] = self.count_bins[old_bin_indices,...]
         
         return new_object
+    
+    def _calc_mean_per_bin(self,index):
+        return np.divide(self.sum_bins[:,index],self.count_bins[:,index],out=np.zeros_like(self.sum_bins[:,index]),where=self.count_bins[:,index]>0)
+    
+    def _calc_std_per_bin(self,index):
+        return np.sqrt(
+            np.divide(self.sum2_bins[:,index],self.count_bins[:,index],out=np.zeros_like(self.sum2_bins[:,index]),where=self.count_bins[:,index]>0) -\
+                np.divide(self.sum_bins[:,index],self.count_bins[:,index],out=np.zeros_like(self.sums[:,index]),where=self.count_bins[:,index]>0) **2 )
+        
+    def _calc_count_per_bin(self,index):
+        return self.count_bins[:,index]
+    
+    def _calc_avg_per_distance_traversed_per_bin(self,index):
+        return np.divide(self.sum_bins[:,index],self.sum_bins[:,self.variable_names.get_loc("Distance traversed")],
+                         out=np.zeros_like(self.sum_bins[:,index]),where=self.count_bins[:,index]>0)
+    
+    def calculate_per_bin(self,quantity,variable):
+        """Calculate a given quantity (mean, std, etc.) over a given variable, on a per-bin basis.
+        
+        Args:
+            quantity (string or callable): a string chosen from "mean", "std", "count", "per_traversed" or else a callable that accepts DataBins, index as inputs.
+            variable (string): a variable to calculate the supplied quantity for. 
+            
+        Return:
+            ndarray: represents the requested calculations for each bin.  
+        """
+        # Error messages
+        err_0 = "DataBins should contain data for variable = '{}'".format(variable)
+        err_1 = "DataBins should contain data for variable = 'Distance traversed' in order to use arg quantity = 'per_traversed'"
+        
+        # Check if variables exist
+        if not variable in self.variable_names:
+            raise ValueError(err_0)
+        elif not "Distance traversed" in self.variable_names and quantity == "per_traversed":
+            raise ValueError(err_1)
+        
+        if callable(quantity):
+            func_ = quantity
+        elif quantity == "mean":
+            func_ = self._calc_mean_per_bin
+        elif quantity == "std":
+            func_ = self._calc_std_per_bin
+        elif quantity == "count":
+            func_ = self._calc_count_per_bin
+        elif quantity == "per_traversed":
+            func_ = self._calc_avg_per_distance_traversed_per_bin
+        else:
+            raise ValueError("quantity arg should be 'mean', 'std', 'count', 'per_traversed', or a callable.")
+        return func_(self.variable_names.get_loc(variable)).reshape(*self.nbin)
+        
         
 def expand_df(df):
     """Expand a dataframe with extra variables:
@@ -393,24 +443,6 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     Returns:
         mpl.Axes,mpl.Axes,mpl.Axes,tuple: Axex object corresponding to each subplot, and a tuple of floats corresponding to the data range. 
     """
-    # Error messages
-    err_0 = "DataBins should contain data for variable = '{}'".format(variable)
-    err_1 = "DataBins should contain data for variable = 'Distance traversed' in order to use arg quantity = 'per_traversed'"
-    # Function used to calculate the plot quantity. 
-    if callable(quantity):
-        func_ = quantity
-    elif quantity == "mean":
-        func_ = lambda data_bins,index: np.divide(data_bins.sum_bins[:,index],data_bins.count_bins[:,index],out=np.zeros_like(data_bins.sum_bins[:,index]),where=data_bins.count_bins[:,index]>0)
-    elif quantity == "std":
-        func_ = lambda data_bins,index: np.sqrt(
-            np.divide(data_bins.sum2_bins[:,index],data_bins.count_bins[:,index],out=np.zeros_like(data_bins.sum2_bins[:,index]),where=data_bins.count_bins[:,index]>0) -\
-                np.divide(data_bins.sum_bins[:,index],data_bins.count_bins[:,index],out=np.zeros_like(data_bins.sums[:,index]),where=data_bins.count_bins[:,index]>0) **2 )
-    elif quantity == "count":
-        func_ = lambda data_bins,index: data_bins.count_bins[:,index]
-    elif quantity == "per_traversed":
-        func_ = lambda data_bins,index: np.divide(data_bins.sum_bins[:,index],data_bins.sum_bins[:,data_bins.variable_names.get_loc("Distance traversed")],out=np.zeros_like(data_bins.sum_bins[:,index]),where=data_bins.count_bins[:,index]>0)
-    else:
-        raise ValueError("quantity arg should be 'mean', 'std', 'count', 'per_traversed', or a callable.")
     
     ax_widths = (3,6,6)
     ax_depth = 6
@@ -418,10 +450,11 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     num_rows = ax_depth + 1 * colorbar
     col_ind = 1
     
-    # Colormapping
-    cmap = plt.colormaps.get(cmap)
+    # Colormapping value ranges
     if vrange is None:
-        vmin,vmax = calc_colour_range(*[func_(hist,hist.variable_names.get_loc(variable)) for hist in (layer_height_bins,xy_plane_bins,orientation_bins) if hist is not None],non_zero=True)
+        vmin,vmax = calc_colour_range(*[hist.calculate_per_bin(quantity,variable) for hist in (layer_height_bins,xy_plane_bins,orientation_bins) 
+                                        if hist is not None],
+                                      non_zero=True)
     else:
         vmin,vmax = vrange
     # Select normalisation
@@ -436,25 +469,8 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     
     # Z-data_bins
     if layer_height_bins is not None:
-        # Check if variables exist
-        if not variable in layer_height_bins.variable_names:
-            raise ValueError(err_0)
-        elif not "Distance traversed" in layer_height_bins.variable_names and quantity == "per_traversed":
-            raise ValueError(err_1)
         ax_z = fig.add_subplot(num_rows,num_cols,(col_ind,num_cols*(ax_depth-1)+ax_widths[0]))
-        index = layer_height_bins.variable_names.get_loc(variable)
-        values = func_(layer_height_bins,index)[1:-1]
-        # Make plot
-        ax_z.barh(0.5*(layer_height_bins.bin_edges[0][1:] + layer_height_bins.bin_edges[0][:-1]),
-            values,
-            layer_height_bins.bin_edges[0][1:] - layer_height_bins.bin_edges[0][:-1],
-            color=cmap(norm(values))
-        )
-        ax_z.set_ylabel("layer number")
-        ax_z.set_xlim(*calc_plot_range(values))
-        ax_z.set_ylim(layer_height_bins.bin_edges[0][0],layer_height_bins.bin_edges[0][-1])
-        ax_z.tick_params(axis='x',labelrotation=-45)
-        ax_z.ticklabel_format(axis='x',scilimits=[-3,4])
+        plot_layer_bins(ax_z,layer_height_bins,quantity,cmap,vrange,norm)
         
         col_ind += ax_widths[0]
     else:
@@ -462,23 +478,8 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     
     # XY planar heatmap
     if xy_plane_bins is not None:
-        # Check if variables exist
-        if not variable in xy_plane_bins.variable_names:
-            raise ValueError(err_0)
-        elif not "Distance traversed" in xy_plane_bins.variable_names and quantity == "per_traversed":
-            raise ValueError(err_1)
         ax_xy = fig.add_subplot(num_rows,num_cols,(col_ind,num_cols*(ax_depth-1)+col_ind+ax_widths[1]-1))
-        index = xy_plane_bins.variable_names.get_loc(variable)
-        values = func_(xy_plane_bins,index).reshape(xy_plane_bins.nbin[0],xy_plane_bins.nbin[1])[1:-1,1:-1]
-        # Make plot 
-        for i,(x_l,x_u) in enumerate(zip(xy_plane_bins.bin_edges[0][:-1],(xy_plane_bins.bin_edges[0][1:]))):
-            for j,(y_l,y_u) in enumerate(zip(xy_plane_bins.bin_edges[0][:-1],(xy_plane_bins.bin_edges[0][1:]))):
-                v = values[i,j]
-                ax_xy.fill_between([x_l,x_u],[y_l,y_l],[y_u,y_u],color=cmap(norm(v)))
-        ax_xy.set_xlabel("x coordinate")
-        ax_xy.set_ylabel("y coordinate")
-        ax_xy.set_aspect("equal")
-        ax_xy.ticklabel_format(scilimits=[4,4])
+        plot_planar_bins(ax_xy,xy_plane_bins,quantity,cmap,vrange,norm)
         
         col_ind += ax_widths[1]
     else:
@@ -486,30 +487,9 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     
     # Orientation data_bins
     if orientation_bins is not None:
-        # Check if variables exist
-        if not variable in orientation_bins.variable_names:
-            raise ValueError(err_0)
-        elif not "Distance traversed" in orientation_bins.variable_names and quantity == "per_traversed":
-            raise ValueError(err_1)
-        
-        # Some plotting parameters
-        bot = 30.0
-        top = 100.0
         
         ax_th = fig.add_subplot(num_rows,num_cols,(col_ind,num_cols*(ax_depth-1)+col_ind+ax_widths[2]-1),polar=True)
-        index = orientation_bins.variable_names.get_loc(variable)
-        values = func_(orientation_bins,index)[1:-1]
-        min_,max_ = calc_plot_range(values)
-        # Make plot 
-        ax_th.bar(0.5*(orientation_bins.bin_edges[0][1:] + orientation_bins.bin_edges[0][:-1]),
-            bot + (top-bot) * (values - min_)/(max_ - min_),
-            width = orientation_bins.bin_edges[0][1:] - orientation_bins.bin_edges[0][:-1],
-            bottom = 0.0,
-            color=cmap(norm(values))
-        )
-        ax_th.set_rticks([bot,0.5*(bot+top),top],labels=map("{:.2e}".format,[min_,0.5*(min_+max_),max_]))
-        ax_th.set_rlabel_position(35.0)
-        #ax_th.tick_params(axis='y',labelrotation=-45)
+        plot_orientation_bins(ax_th,orientation_bins,quantity,cmap,vrange,norm)
         
         col_ind += ax_widths[2]
     else:
@@ -529,3 +509,112 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
         #col_ind += 1
     
     return ax_z,ax_xy,ax_th,(vmin,vmax)
+
+def plot_orientation_bins(ax,variable,orientation_bins,
+                          quantity="mean",cmap="afmhot_r",
+                          vrange=None,normalisation='linear'):
+    # Colormapping
+    cmap = plt.colormaps.get(cmap)
+    if vrange is None:
+        vmin,vmax = calc_colour_range(orientation_bins,non_zero=True)
+    else:
+        vmin,vmax = vrange
+    # Select normalisation
+    if callable(normalisation):
+        norm = normalisation 
+    if normalisation.lower()=='linear':
+        norm = Normalize(vmin,vmax,clip=True)
+    elif normalisation.lower()=='symlog':
+        norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=True)
+    elif normalisation.lower()=='log':
+        norm = LogNorm(vmin=vmin,vmax=vmax,clip=True)
+    else:
+        raise ValueError("Normalisation should be 'linear', 'symlog', or 'log'.")
+    
+    # Some plotting parameters
+    bot = 30.0
+    top = 100.0
+    
+    values = orientation_bins.calculate_per_bin(quantity,variable)[1:-1]
+    min_,max_ = calc_plot_range(values)
+    # Make plot 
+    ax.bar(0.5*(orientation_bins.bin_edges[0][1:] + orientation_bins.bin_edges[0][:-1]),
+        bot + (top-bot) * (values - min_)/(max_ - min_),
+        width = orientation_bins.bin_edges[0][1:] - orientation_bins.bin_edges[0][:-1],
+        bottom = 0.0,
+        color=cmap(norm(values))
+    )
+    ax.set_rticks([bot,0.5*(bot+top),top],labels=map("{:.2e}".format,[min_,0.5*(min_+max_),max_]))
+    ax.set_rlabel_position(35.0)
+    
+    return vrange
+    
+def plot_planar_bins(ax,variable,xy_plane_bins,
+                     quantity="mean",cmap="afmhot_r",
+                     vrange=None,normalisation='linear'):
+    # Colormapping
+    cmap = plt.colormaps.get(cmap)
+    if vrange is None:
+        vmin,vmax = calc_colour_range(xy_plane_bins,non_zero=True)
+    else:
+        vmin,vmax = vrange
+    # Select normalisation
+    if callable(normalisation):
+        norm = normalisation 
+    if normalisation.lower()=='linear':
+        norm = Normalize(vmin,vmax,clip=True)
+    elif normalisation.lower()=='symlog':
+        norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=True)
+    elif normalisation.lower()=='log':
+        norm = LogNorm(vmin=vmin,vmax=vmax,clip=True)
+    else:
+        raise ValueError("Normalisation should be 'linear', 'symlog', or 'log'.")
+    
+    values = xy_plane_bins.calculate_per_bin(quantity,variable)[1:-1,1:-1]
+    # Make plot 
+    for i,(x_l,x_u) in enumerate(zip(xy_plane_bins.bin_edges[0][:-1],(xy_plane_bins.bin_edges[0][1:]))):
+        for j,(y_l,y_u) in enumerate(zip(xy_plane_bins.bin_edges[0][:-1],(xy_plane_bins.bin_edges[0][1:]))):
+            v = values[i,j]
+            ax.fill_between([x_l,x_u],[y_l,y_l],[y_u,y_u],color=cmap(norm(v)))
+    ax.set_xlabel("x coordinate")
+    ax.set_ylabel("y coordinate")
+    ax.set_aspect("equal")
+    ax.ticklabel_format(scilimits=[4,4])
+    
+    return vrange
+    
+def plot_layer_bins(ax,variable,layer_height_bins,
+                    quantity="mean",cmap="afmhot_r",
+                    vrange=None,normalisation='linear'):
+    # Colormapping
+    cmap = plt.colormaps.get(cmap)
+    if vrange is None:
+        vmin,vmax = calc_colour_range(layer_height_bins,non_zero=True)
+    else:
+        vmin,vmax = vrange
+    # Select normalisation
+    if callable(normalisation):
+        norm = normalisation 
+    if normalisation.lower()=='linear':
+        norm = Normalize(vmin,vmax,clip=True)
+    elif normalisation.lower()=='symlog':
+        norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=True)
+    elif normalisation.lower()=='log':
+        norm = LogNorm(vmin=vmin,vmax=vmax,clip=True)
+    else:
+        raise ValueError("Normalisation should be 'linear', 'symlog', or 'log'.")
+    
+    values = layer_height_bins.calculate_per_bin(quantity,variable)[1:-1]
+    # Make plot
+    ax.barh(0.5*(layer_height_bins.bin_edges[0][1:] + layer_height_bins.bin_edges[0][:-1]),
+        values,
+        layer_height_bins.bin_edges[0][1:] - layer_height_bins.bin_edges[0][:-1],
+        color=cmap(norm(values))
+    )
+    ax.set_ylabel("layer number")
+    ax.set_xlim(*calc_plot_range(values))
+    ax.set_ylim(layer_height_bins.bin_edges[0][0],layer_height_bins.bin_edges[0][-1])
+    ax.tick_params(axis='x',labelrotation=-45)
+    ax.ticklabel_format(axis='x',scilimits=[-3,4])
+    
+    return vrange
