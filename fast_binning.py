@@ -270,9 +270,9 @@ class DataBins():
     def __getitem__(self,indices):
         if isinstance(indices,tuple):
             # If a tuple, it should have at the same length as the number of coordinates
-            if len(tuple) < self.D:
+            if len(indices) < self.D:
                 raise ValueError("Trying to slice along too few dimensions ({}). This object has {} coordinates.".format(len(tuple),self.D))
-            elif len(tuple) > self.D:
+            elif len(indices) > self.D:
                 raise ValueError("Trying to slice along too many dimensions ({}). This object only has {} coordinates.".format(len(tuple),self.D))
         else:
             indices = (indices,) # For ease of handling 
@@ -282,8 +282,9 @@ class DataBins():
         bin_indices = []
         for idx,coord_name,edges in zip(indices,self.coord_names,self.bin_edges):
             if isinstance(idx,slice):
-                if abs(idx.step) != 1:
-                    raise ValueError("Slicing only supports continuous slicing.")
+                if idx.step is not None:
+                    if abs(idx.step) != 1:
+                       raise ValueError("Slicing only supports continuous slicing.")
                 start,stop,step = idx.indices(len(edges)-1)
                 bin_indices.append(list(range(*slice(start+1,stop+1,step).indices(len(edges)+1)))) # +1 accounts for the extra bin at each end
                 # Now modify to account for the next step where we get edges not bins. 
@@ -292,7 +293,7 @@ class DataBins():
                 new_coord_names.append(coord_name)
                 new_bin_edges.append(edges[slice(start,stop,idx.step)])
             elif isinstance(idx,int):
-                bin_indices.append([idx])
+                bin_indices.append([idx+1])
             else:
                 raise ValueError("Indices must be supplied as slice or int.")
         
@@ -300,7 +301,7 @@ class DataBins():
         new_object = DataBins(new_coord_names,new_bin_edges,new_variable_names,**self.kwargs)
         # Can now slice this object's bins
         old_bin_indices = np.ravel_multi_index(tuple(bin_indices),self.nbin)
-        new_bin_indices = np.ravel_multi_index((np.arange(1,nbin-1) for nbin in new_object.nbin),new_object.nbin) # Don't care about the extra bins at each end
+        new_bin_indices = np.ravel_multi_index([np.arange(1,nbin-1) for nbin in new_object.nbin],new_object.nbin) # Don't care about the extra bins at each end
         new_object.sum_bins[new_bin_indices,...] = self.sum_bins[old_bin_indices,...]
         new_object.sum2_bins[new_bin_indices,...] = self.sum2_bins[old_bin_indices,...]
         new_object.count_bins[new_bin_indices,...] = self.count_bins[old_bin_indices,...]
@@ -470,7 +471,7 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     # Z-data_bins
     if layer_height_bins is not None:
         ax_z = fig.add_subplot(num_rows,num_cols,(col_ind,num_cols*(ax_depth-1)+ax_widths[0]))
-        plot_layer_bins(ax_z,layer_height_bins,quantity,cmap,vrange,norm)
+        plot_layer_bins(ax_z,layer_height_bins,variable,quantity,cmap,vrange,norm)
         
         col_ind += ax_widths[0]
     else:
@@ -479,7 +480,7 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     # XY planar heatmap
     if xy_plane_bins is not None:
         ax_xy = fig.add_subplot(num_rows,num_cols,(col_ind,num_cols*(ax_depth-1)+col_ind+ax_widths[1]-1))
-        plot_planar_bins(ax_xy,xy_plane_bins,quantity,cmap,vrange,norm)
+        plot_planar_bins(ax_xy,xy_plane_bins,variable,quantity,cmap,vrange,norm)
         
         col_ind += ax_widths[1]
     else:
@@ -489,7 +490,7 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     if orientation_bins is not None:
         
         ax_th = fig.add_subplot(num_rows,num_cols,(col_ind,num_cols*(ax_depth-1)+col_ind+ax_widths[2]-1),polar=True)
-        plot_orientation_bins(ax_th,orientation_bins,quantity,cmap,vrange,norm)
+        plot_orientation_bins(ax_th,orientation_bins,variable,quantity,cmap,vrange,norm)
         
         col_ind += ax_widths[2]
     else:
@@ -510,19 +511,37 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     
     return ax_z,ax_xy,ax_th,(vmin,vmax)
 
-def plot_orientation_bins(ax,variable,orientation_bins,
+def plot_orientation_bins(ax,orientation_bins,variable,
                           quantity="mean",cmap="afmhot_r",
                           vrange=None,normalisation='linear'):
+    """This functions plots orientation bins onto a matplotlib axis object. 
+    Both must be supplied to the function. 
+
+    Args:
+        ax (matplotlib.Axes): axes to plot onto. 
+        variable (string): Bin variable to access and calculate the quantity over. 
+        orientation_bins (DataBins): Data bins to plot. 
+        quantity (str, optional): Quantity to calculate and diplay per bin (for the selected variable). Defaults to "mean".
+        cmap (str, optional): Colormap to use. Defaults to "afmhot_r".
+        vrange (tuple, optional): Value range for the colormap. Defaults to None.
+        normalisation (str, optional): Normalisation to apply to the colormap. Defaults to 'linear'.
+
+    Raises:
+        ValueError: If the supplied norm is not one of linear, symlog, or log. 
+
+    Returns:
+        tuple: Minimum and maximum values used. 
+    """
     # Colormapping
     cmap = plt.colormaps.get(cmap)
     if vrange is None:
-        vmin,vmax = calc_colour_range(orientation_bins,non_zero=True)
+        vmin,vmax = calc_colour_range(orientation_bins.calculate_per_bin(quantity,variable),non_zero=True)
     else:
         vmin,vmax = vrange
     # Select normalisation
     if callable(normalisation):
         norm = normalisation 
-    if normalisation.lower()=='linear':
+    elif normalisation.lower()=='linear':
         norm = Normalize(vmin,vmax,clip=True)
     elif normalisation.lower()=='symlog':
         norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=True)
@@ -549,19 +568,37 @@ def plot_orientation_bins(ax,variable,orientation_bins,
     
     return vrange
     
-def plot_planar_bins(ax,variable,xy_plane_bins,
+def plot_planar_bins(ax,xy_plane_bins,variable,
                      quantity="mean",cmap="afmhot_r",
                      vrange=None,normalisation='linear'):
+    """This functions plots planar (typically XY plane) bins onto a matplotlib axis object. 
+    Both must be supplied to the function. 
+
+    Args:
+        ax (matplotlib.Axes): axes to plot onto. 
+        variable (string): Bin variable to access and calculate the quantity over. 
+        orientation_bins (DataBins): Data bins to plot. 
+        quantity (str, optional): Quantity to calculate and diplay per bin (for the selected variable). Defaults to "mean".
+        cmap (str, optional): Colormap to use. Defaults to "afmhot_r".
+        vrange (tuple, optional): Value range for the colormap. Defaults to None.
+        normalisation (str, optional): Normalisation to apply to the colormap. Defaults to 'linear'.
+
+    Raises:
+        ValueError: If the supplied norm is not one of linear, symlog, or log. 
+
+    Returns:
+        tuple: Minimum and maximum values used. 
+    """
     # Colormapping
     cmap = plt.colormaps.get(cmap)
     if vrange is None:
-        vmin,vmax = calc_colour_range(xy_plane_bins,non_zero=True)
+        vmin,vmax = calc_colour_range(xy_plane_bins.calculate_per_bin(quantity,variable),non_zero=True)
     else:
         vmin,vmax = vrange
     # Select normalisation
     if callable(normalisation):
         norm = normalisation 
-    if normalisation.lower()=='linear':
+    elif normalisation.lower()=='linear':
         norm = Normalize(vmin,vmax,clip=True)
     elif normalisation.lower()=='symlog':
         norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=True)
@@ -583,19 +620,37 @@ def plot_planar_bins(ax,variable,xy_plane_bins,
     
     return vrange
     
-def plot_layer_bins(ax,variable,layer_height_bins,
+def plot_layer_bins(ax,layer_height_bins,variable,
                     quantity="mean",cmap="afmhot_r",
                     vrange=None,normalisation='linear'):
+    """This functions plots layer / height / Z-direction bins onto a matplotlib axis object. 
+    Both must be supplied to the function. 
+
+    Args:
+        ax (matplotlib.Axes): axes to plot onto. 
+        variable (string): Bin variable to access and calculate the quantity over. 
+        orientation_bins (DataBins): Data bins to plot. 
+        quantity (str, optional): Quantity to calculate and diplay per bin (for the selected variable). Defaults to "mean".
+        cmap (str, optional): Colormap to use. Defaults to "afmhot_r".
+        vrange (tuple, optional): Value range for the colormap. Defaults to None.
+        normalisation (str, optional): Normalisation to apply to the colormap. Defaults to 'linear'.
+
+    Raises:
+        ValueError: If the supplied norm is not one of linear, symlog, or log. 
+
+    Returns:
+        tuple: Minimum and maximum values used. 
+    """
     # Colormapping
     cmap = plt.colormaps.get(cmap)
     if vrange is None:
-        vmin,vmax = calc_colour_range(layer_height_bins,non_zero=True)
+        vmin,vmax = calc_colour_range(layer_height_bins.calculate_per_bin(quantity,variable),non_zero=True)
     else:
         vmin,vmax = vrange
     # Select normalisation
     if callable(normalisation):
         norm = normalisation 
-    if normalisation.lower()=='linear':
+    elif normalisation.lower()=='linear':
         norm = Normalize(vmin,vmax,clip=True)
     elif normalisation.lower()=='symlog':
         norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=True)
