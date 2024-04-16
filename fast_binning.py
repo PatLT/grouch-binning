@@ -534,19 +534,19 @@ def plot_orientation_bins(ax,orientation_bins,variable,
     """
     # Colormapping
     cmap = plt.colormaps.get(cmap)
+    cmap.set_under("w")
     if vrange is None:
-        vmin,vmax = calc_colour_range(orientation_bins.calculate_per_bin(quantity,variable),non_zero=True)
-    else:
-        vmin,vmax = vrange
+        vrange = calc_colour_range(orientation_bins.calculate_per_bin(quantity,variable),non_zero=True)
+    vmin,vmax = vrange
     # Select normalisation
     if callable(normalisation):
         norm = normalisation 
     elif normalisation.lower()=='linear':
-        norm = Normalize(vmin,vmax,clip=True)
+        norm = Normalize(vmin,vmax,clip=False)
     elif normalisation.lower()=='symlog':
-        norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=True)
+        norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=False)
     elif normalisation.lower()=='log':
-        norm = LogNorm(vmin=vmin,vmax=vmax,clip=True)
+        norm = LogNorm(vmin=vmin,vmax=vmax,clip=False)
     else:
         raise ValueError("Normalisation should be 'linear', 'symlog', or 'log'.")
     
@@ -591,26 +591,26 @@ def plot_planar_bins(ax,xy_plane_bins,variable,
     """
     # Colormapping
     cmap = plt.colormaps.get(cmap)
+    cmap.set_under("w")
     if vrange is None:
-        vmin,vmax = calc_colour_range(xy_plane_bins.calculate_per_bin(quantity,variable),non_zero=True)
-    else:
-        vmin,vmax = vrange
+        vrange = calc_colour_range(xy_plane_bins.calculate_per_bin(quantity,variable),non_zero=True)
+    vmin,vmax = vrange
     # Select normalisation
     if callable(normalisation):
         norm = normalisation 
     elif normalisation.lower()=='linear':
-        norm = Normalize(vmin,vmax,clip=True)
+        norm = Normalize(vmin,vmax,clip=False)
     elif normalisation.lower()=='symlog':
-        norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=True)
+        norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=False)
     elif normalisation.lower()=='log':
-        norm = LogNorm(vmin=vmin,vmax=vmax,clip=True)
+        norm = LogNorm(vmin=vmin,vmax=vmax,clip=False)
     else:
         raise ValueError("Normalisation should be 'linear', 'symlog', or 'log'.")
     
     values = xy_plane_bins.calculate_per_bin(quantity,variable)[1:-1,1:-1]
     # Make plot 
     for i,(x_l,x_u) in enumerate(zip(xy_plane_bins.bin_edges[0][:-1],(xy_plane_bins.bin_edges[0][1:]))):
-        for j,(y_l,y_u) in enumerate(zip(xy_plane_bins.bin_edges[0][:-1],(xy_plane_bins.bin_edges[0][1:]))):
+        for j,(y_l,y_u) in enumerate(zip(xy_plane_bins.bin_edges[1][:-1],(xy_plane_bins.bin_edges[1][1:]))):
             v = values[i,j]
             ax.fill_between([x_l,x_u],[y_l,y_l],[y_u,y_u],color=cmap(norm(v)))
     ax.set_xlabel("x coordinate")
@@ -643,19 +643,19 @@ def plot_layer_bins(ax,layer_height_bins,variable,
     """
     # Colormapping
     cmap = plt.colormaps.get(cmap)
+    cmap.set_under("w")
     if vrange is None:
-        vmin,vmax = calc_colour_range(layer_height_bins.calculate_per_bin(quantity,variable),non_zero=True)
-    else:
-        vmin,vmax = vrange
+        vrange = calc_colour_range(layer_height_bins.calculate_per_bin(quantity,variable),non_zero=True)
+    vmin,vmax = vrange
     # Select normalisation
     if callable(normalisation):
         norm = normalisation 
     elif normalisation.lower()=='linear':
-        norm = Normalize(vmin,vmax,clip=True)
+        norm = Normalize(vmin,vmax,clip=False)
     elif normalisation.lower()=='symlog':
-        norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=True)
+        norm = SymLogNorm(linthresh=np.floor(np.log10(np.abs(vmin))),vmin=vmin,vmax=vmax,clip=False)
     elif normalisation.lower()=='log':
-        norm = LogNorm(vmin=vmin,vmax=vmax,clip=True)
+        norm = LogNorm(vmin=vmin,vmax=vmax,clip=False)
     else:
         raise ValueError("Normalisation should be 'linear', 'symlog', or 'log'.")
     
