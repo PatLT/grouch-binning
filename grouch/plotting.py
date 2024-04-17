@@ -15,6 +15,7 @@ def calc_plot_range(*data_vals,non_zero=False):
     min_ = np.inf
     max_ = -np.inf
     for values in data_vals:
+        values = np.asarray(values)
         new_min = np.ma.masked_equal(values,0.0,copy=True).min() if non_zero else values.min()
         new_max = values.max()
         max_ = new_max if new_max > max_ else max_
@@ -41,7 +42,9 @@ def calc_colour_range(*data_vals,non_zero=True):
     return float(min_),float(max_)
 
 def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height_bins=None,
-              quantity="mean",cmap="afmhot_r",vrange=None,colorbar=True,normalisation='linear'):
+              quantity="mean",cmap="afmhot_r",
+              vrange=None,vrange_xy=None,vrange_o=None,vrange_l=None,
+              colorbar=True,normalisation='linear'):
     """This function plots supplied bins (for a selection of the x-y, orientation, and Z-layer bins).
 
     Args:
@@ -52,7 +55,12 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
         layer_height_bins (DataBins, optional): Bins against height / layer number. Defaults to None.
         quantity (str or callable, optional): The quantity to calculate on a per-bin basis. Defaults to "mean".
         cmap (str, optional): a matplotlib colormap. Defaults to "afmhot_r".
-        vrange (tuple, optional): The range of data values to use. Defaults to None.
+        vrange (tuple, optional): The range of data values to use for colours. Defaults to None.
+        vrange_o (tuple, optional): The range of data values to use for orientation plot scale. Defaults to None.
+        vrange_xy (tuple, optional): The range of data values to use for xy plot scale. Defaults to None.
+        vrange_l (tuple, optional): The range of data values to use for layer plot scale. Defaults to None.
+        colorbar (bool, optional): Whether to add a colorbar to the bottom of the plot.
+        normalisation (string, linear): A normalisation option for the the colormap.
 
     Raises:
         ValueError: quantity arg should be 'mean', 'std', 'count', 'per_traversed', or a callable.
@@ -87,7 +95,7 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     # Z-data_bins
     if layer_height_bins is not None:
         ax_z = fig.add_subplot(num_rows,num_cols,(col_ind,num_cols*(ax_depth-1)+ax_widths[0]))
-        plot_layer_bins(ax_z,layer_height_bins,variable,quantity,cmap,vrange,norm)
+        vrange_l = plot_layer_bins(ax_z,layer_height_bins,variable,quantity,cmap,vrange,vrange_l,norm)
         
         col_ind += ax_widths[0]
     else:
@@ -106,7 +114,7 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
     if orientation_bins is not None:
         
         ax_th = fig.add_subplot(num_rows,num_cols,(col_ind,num_cols*(ax_depth-1)+col_ind+ax_widths[2]-1),polar=True)
-        plot_orientation_bins(ax_th,orientation_bins,variable,quantity,cmap,vrange,norm)
+        vrange_o = plot_orientation_bins(ax_th,orientation_bins,variable,quantity,cmap,vrange,vrange_o,norm)
         
         col_ind += ax_widths[2]
     else:
@@ -125,11 +133,12 @@ def plot_bins(fig,variable,xy_plane_bins=None,orientation_bins=None,layer_height
             ax_cb.ticklabel_format(scilimits=[-3,4])
         #col_ind += 1
     
-    return ax_z,ax_xy,ax_th,(vmin,vmax)
+    return ax_z,ax_xy,ax_th,(vmin,vmax),vrange_xy,vrange_o,vrange_l
 
 def plot_orientation_bins(ax,orientation_bins,variable,
                           quantity="mean",cmap="afmhot_r",
-                          vrange=None,normalisation='linear'):
+                          vrange=None,vrange_o=None,
+                          normalisation='linear'):
     """This functions plots orientation bins onto a matplotlib axis object. 
     Both must be supplied to the function. 
 
@@ -140,13 +149,14 @@ def plot_orientation_bins(ax,orientation_bins,variable,
         quantity (str, optional): Quantity to calculate and diplay per bin (for the selected variable). Defaults to "mean".
         cmap (str, optional): Colormap to use. Defaults to "afmhot_r".
         vrange (tuple, optional): Value range for the colormap. Defaults to None.
+        vrange_o (tuple, optional): Value range for the axis. Defaults to None.
         normalisation (str, optional): Normalisation to apply to the colormap. Defaults to 'linear'.
 
     Raises:
         ValueError: If the supplied norm is not one of linear, symlog, or log. 
 
     Returns:
-        tuple: Minimum and maximum values used. 
+        tuple: Minimum and maximum values used in plot axis. 
     """
     # Colormapping
     cmap = plt.colormaps.get(cmap)
@@ -171,7 +181,10 @@ def plot_orientation_bins(ax,orientation_bins,variable,
     top = 100.0
     
     values = orientation_bins.calculate_per_bin(quantity,variable)[1:-1]
-    min_,max_ = calc_plot_range(values)
+    if vrange_o is None:
+      min_,max_ = calc_plot_range(values)
+    else:
+        min_,max_ = vrange_o
     # Make plot 
     ax.bar(0.5*(orientation_bins.bin_edges[0][1:] + orientation_bins.bin_edges[0][:-1]),
         bot + (top-bot) * (values - min_)/(max_ - min_),
@@ -182,7 +195,7 @@ def plot_orientation_bins(ax,orientation_bins,variable,
     ax.set_rticks([bot,0.5*(bot+top),top],labels=map("{:.2e}".format,[min_,0.5*(min_+max_),max_]))
     ax.set_rlabel_position(35.0)
     
-    return vrange
+    return min_,max_
     
 def plot_planar_bins(ax,xy_plane_bins,variable,
                      quantity="mean",cmap="afmhot_r",
@@ -238,7 +251,8 @@ def plot_planar_bins(ax,xy_plane_bins,variable,
     
 def plot_layer_bins(ax,layer_height_bins,variable,
                     quantity="mean",cmap="afmhot_r",
-                    vrange=None,normalisation='linear'):
+                    vrange=None,vrange_l=None,
+                    normalisation='linear'):
     """This functions plots layer / height / Z-direction bins onto a matplotlib axis object. 
     Both must be supplied to the function. 
 
@@ -249,6 +263,7 @@ def plot_layer_bins(ax,layer_height_bins,variable,
         quantity (str, optional): Quantity to calculate and diplay per bin (for the selected variable). Defaults to "mean".
         cmap (str, optional): Colormap to use. Defaults to "afmhot_r".
         vrange (tuple, optional): Value range for the colormap. Defaults to None.
+        vrange_l (tuple, optional): Value range for the plot axis. Defaults to None.
         normalisation (str, optional): Normalisation to apply to the colormap. Defaults to 'linear'.
 
     Raises:
@@ -283,9 +298,13 @@ def plot_layer_bins(ax,layer_height_bins,variable,
         color=cmap(norm(values))
     )
     ax.set_ylabel("layer number")
-    ax.set_xlim(*calc_plot_range(values))
+    if vrange_l is None:
+        min_,max_ = calc_plot_range(values)
+    else:
+        min_,max_ = vrange_l
+    ax.set_xlim(min_,max_)
     ax.set_ylim(layer_height_bins.bin_edges[0][0],layer_height_bins.bin_edges[0][-1])
     ax.tick_params(axis='x',labelrotation=-45)
     ax.ticklabel_format(axis='x',scilimits=[-3,4])
     
-    return vrange
+    return min_,max_
